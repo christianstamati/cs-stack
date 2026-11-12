@@ -243,6 +243,12 @@ Multi-select. **Google** (recommended), GitHub, email and password, magic link. 
 only methods the chosen auth library supports. OAuth client IDs and secrets are manual
 steps; leave placeholders in \`.env.local\`.
 
+Convex Auth v2 supports Google, GitHub, Apple, email and password, username and
+password, and username and passkey. It has no magic link. Its email and password
+method sends verification and reset emails through Resend, so a Resend account and a
+verified sender domain become manual steps. Its OAuth secrets live in Convex env vars,
+not \`.env.local\` (see **Convex Auth v2 reference**).
+
 ### Q12. UI styling
 
 The UI stack is fixed and not a question: **shadcn/ui + Tailwind CSS on Base UI
@@ -338,13 +344,11 @@ Apply these when filtering options, validating a preset, and building:
   non-interactive way to start one, such as \`CONVEX_AGENT_MODE=anonymous\`). Linking a
   Convex Cloud project is a manual step for later.
 - **Convex Auth must be v2.** Convex Auth has two major versions; always set up v2,
-  never v1. v2 may have no written docs yet: if so, the examples in the
-  \`get-convex/convex-auth\` repo at the latest v2 tag are the reference. Check npm for
-  the newest v2 version and pin it exactly (it may be an alpha; an alpha release must
-  not change under the user). Don't copy v1-era setup code from memory or from older
-  guides. Don't run the interactive \`npx @convex-dev/auth\` key-generation wizard,
-  because it hangs in non-interactive runs; generate the keys and set the env vars as
-  the v2 examples do.
+  never v1. v2 is stable: install \`@convex-dev/auth\` at npm's \`latest\` tag and confirm
+  with \`npm view @convex-dev/auth version\` that it is 2.x. If it isn't, stop and tell
+  the user. Follow the v2 docs and the **Convex Auth v2 reference** below. Don't copy
+  v1-era setup code from memory or from older guides, and don't run the
+  \`npx @convex-dev/auth\` wizard (it is v1-only and hangs in non-interactive runs).
 - **Every API layer** exposes a typed client the frontend actually uses, and a \`/health\`
   route (or equivalent procedure) for the Verify phase. With Drizzle, the API calls the
   shared db client; it never creates its own connection logic.
@@ -394,6 +398,130 @@ Apply these when filtering options, validating a preset, and building:
 - If the user's combination breaks a rule not listed here, explain the conflict in one
   sentence and offer the closest working alternative.
 
+## Convex Auth v2 reference
+
+Read this only when Q11 is Convex Auth. The official docs are the source of truth.
+Before writing auth code, read the page for each method you are setting up:
+
+- Getting started: https://docs.convex.dev/auth/convex-auth/getting-started
+- Email and password: https://docs.convex.dev/auth/convex-auth/methods/email-password
+- OAuth (Google, GitHub, Apple): https://docs.convex.dev/auth/convex-auth/methods/oauth
+- Best practices: https://docs.convex.dev/auth/convex-auth/best-practices
+- React client API: https://docs.convex.dev/convex-auth-api/react
+- SSR client API: https://docs.convex.dev/convex-auth-api/ssr
+- Index of every docs page: https://docs.convex.dev/llms.txt (each page also has a
+  \`.md\` version)
+
+The notes below summarize those pages as of November 2026, so you know what v2 code
+looks like and can spot v1 code. If the docs disagree with them, follow the docs.
+
+### What v1 code looks like (don't write it)
+
+v2 is built on Convex components. Each sign-in method is its own component with its
+own setup function and React hooks. None of these v1 pieces exist in v2:
+
+- \`authTables\` spread into the schema
+- \`convexAuth({ providers: [...] })\` and \`@auth/core\` provider imports
+- \`auth.addHttpRoutes(http)\` in \`convex/http.ts\`
+- \`signIn("google")\` from \`useAuthActions()\`
+- \`JWT_PRIVATE_KEY\` / \`JWKS\` env vars and the key-generation wizard. v2 signs tokens
+  with the deployment's own key, so there are no keys to generate.
+
+If a search result, an example repo or your own memory shows any of these, it is v1.
+
+### Backend files
+
+- \`convex/convex.config.ts\`: \`const app = defineApp()\`, then \`app.use(auth)\` (from
+  \`@convex-dev/auth/convex.config.js\`), then one \`app.use(...)\` per method component,
+  e.g. \`authGoogle\` from \`@convex-dev/auth/components/google/convex.config.js\` with
+  \`httpPrefix: "/oauth/google"\`. Declare the env vars each component needs in
+  \`defineApp({ env: { ... } })\` and pass them in from \`app.env\`.
+- \`convex/auth.config.ts\`: \`providers: [convexAuthProvider()]\` (from
+  \`@convex-dev/auth/server\`), \`satisfies AuthConfig\`.
+- \`convex/auth.ts\`: \`const auth = setupConvexAuth({ component: components.auth })\`,
+  exporting \`signOut\`, \`refreshSession\` and \`isAuthenticated\`. Each method adds a setup
+  call, e.g. \`setupGoogle(auth, { component: components.authGoogle,
+  allowedRedirectOrigins: [...] }).attachUserCallbacks({ createUser:
+  internal.users.createUser })\`, and you export the functions it returns
+  (\`startSignInWithGoogle\`, \`completeSignInWithGoogle\`).
+- \`convex/schema.ts\`: a \`users\` table. It can start empty (\`defineTable({})\`).
+- \`convex/users.ts\`: \`createUser\`, an \`internalMutation\` that inserts a \`users\` row and
+  returns its id. Its \`method\` arg is typed per method (\`vGoogleProfile\` from
+  \`@convex-dev/auth/methods/google/server\`, and so on). An optional \`onSignIn\` callback
+  runs on every sign-in.
+
+### Client
+
+- Wrap the app in \`ConvexAuthProvider\` from \`@convex-dev/auth/react\` instead of
+  \`ConvexProvider\`. Pass \`client\` and \`api={{ refreshSession:
+  api.auth.refreshSession, signOut: api.auth.signOut, isAuthenticated:
+  api.auth.isAuthenticated }}\`.
+- Token storage defaults to \`localStorage\` in the browser and memory during SSR.
+  TanStack Start and Next.js render on the server, so read the SSR client API page
+  before wiring the provider.
+- Sign in through the method's own hook, e.g. \`useSignInWithGoogle(api.auth)\` from
+  \`@convex-dev/auth/methods/google/react\`. Its \`signIn()\` returns \`status: "redirect"\`
+  or a typed \`userError\`. After the OAuth redirect back, check \`useOauth().flowError\`.
+- Sign out with \`useAuthActions().signOut()\`. \`useAuthToken()\` returns the access token
+  for \`Authorization: Bearer\` calls to Convex HTTP actions. Never send it to any other
+  server.
+- Gate UI with the auth state from \`convex/react\` (\`useConvexAuth\`, \`<Authenticated>\`,
+  \`<Unauthenticated>\`, \`<AuthLoading>\`). That only hides UI. Every query and mutation
+  that touches user data must check \`getAuthUserId(ctx)\` (from
+  \`@convex-dev/auth/server\`) itself.
+
+### OAuth
+
+- The callback URL is on the Convex deployment, not the frontend:
+  \`<CONVEX_SITE_URL>/oauth/<provider>/callback\`. Read the value with
+  \`npx convex env get CONVEX_SITE_URL\`. Dev and prod deployments have different URLs,
+  and the user must register each one with the provider.
+- Client IDs and secrets are Convex env vars, set with \`npx convex env set\`:
+  \`AUTH_GOOGLE_CLIENT_ID\` / \`AUTH_GOOGLE_CLIENT_SECRET\`, \`AUTH_GITHUB_CLIENT_ID\` /
+  \`AUTH_GITHUB_CLIENT_SECRET\`. List them in \`.env.example\` and the README as Convex env
+  vars, and give the exact \`npx convex env set\` commands as manual steps.
+- \`allowedRedirectOrigins\` must list the frontend's real dev origin and its production
+  origin. The docs' examples use \`http://localhost:5173\`. Check the port your app
+  actually runs on.
+- Apple needs a paid Apple Developer account and four env vars (\`AUTH_APPLE_CLIENT_ID\`,
+  \`AUTH_APPLE_TEAM_ID\`, \`AUTH_APPLE_KEY_ID\`, \`AUTH_APPLE_PRIVATE_KEY\`). Apple rejects
+  localhost callbacks, so a local deployment can't use it without an HTTPS tunnel.
+  Apple sends the user's name only on the first sign-in, so store it in \`createUser\`.
+
+### Email and password
+
+- Needs three components besides \`auth\`: password, email and Resend
+  (\`@convex-dev/resend\`). Env vars: \`RESEND_API_KEY\` and \`SENDER_EMAIL\` (required; the
+  sender must be on a domain verified in Resend), \`SENDER_NAME\` and \`SITE_URL\`
+  (optional; \`SITE_URL\` is the base for links in emails).
+- Sign-up doesn't create a session. The user gets a validation link and is signed in
+  when they open it. Password reset and email change also go through emailed links.
+  Add a landing route for each link (the docs use \`/validate-email\`,
+  \`/reset-password\` and \`/confirm-email-change\`, plus \`/forgot-password\` to request a
+  reset). These routes must not require sign-in.
+- A link only works in the browser that started the flow. Anywhere else it fails with
+  \`MISSING_SECRET\`.
+- Rate limits on emails and password attempts are built in and can't be configured.
+
+### App code
+
+- Keep app data in your own tables, with an indexed field holding the user id. Don't
+  copy data the auth components own (verified email, username) into your tables. Read
+  it from the component when you need it, e.g.
+  \`components.authEmail.verifiedEmails.getPrimaryEmail\`.
+- Every auth hook returns typed error codes. Handle them in a \`switch\` whose default
+  branch is \`result.userError satisfies never\`, so a new code breaks the type check,
+  and show the user a specific message for each.
+- Set \`autoComplete\` on auth inputs: \`username\` on the email or username field,
+  \`current-password\` on sign-in, \`new-password\` on sign-up and reset.
+
+### Verify without credentials
+
+If \`convex dev\` won't push because a declared env var is unset, set an obviously fake
+value on the local deployment with \`npx convex env set\` and list the real value as a
+manual step. Sign-in itself can't be tested without real credentials. Say that in the
+final report.
+
 ## Phase 2 — Plan and confirm
 
 Before touching the filesystem, show:
@@ -423,7 +551,7 @@ On approval, save the final answers to \`.cs-stack/config.json\` using this shap
   "deploy": "vercel | sst | none",
   "dbHost": "neon | supabase | aws | planetscale | turso | atlas | local | null",
   "auth": "none | better-auth | clerk | workos | convex-auth-v2 | payload",
-  "authMethods": ["google | github | password | magic-link"],
+  "authMethods": ["google | github | apple | password | username-password | passkey | magic-link"],
   "ui": {
     "library": "shadcn",
     "base": "base-ui",
